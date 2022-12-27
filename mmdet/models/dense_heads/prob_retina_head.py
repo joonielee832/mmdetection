@@ -53,22 +53,22 @@ class ProbabilisticRetinaHead(AnchorHead):
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.dropout_rate = dropout_rate
-        # self.compute_cls_var = loss_prob['cls_var_loss'] != None
-        # self.compute_bbox_cov = loss_prob['bbox_cov_loss'] != None
+        self.compute_cls_var = loss_prob['cls_var_loss'] != None
+        self.compute_bbox_cov = loss_prob['bbox_cov_loss'] != None
         
-        # if self.compute_cls_var:
-        #     self.cls_var_loss = loss_prob['cls_var_loss']['name']
-        #     self.cls_var_num_samples = loss_prob['cls_var_loss']['num_samples']
-        # if self.compute_bbox_cov:
-        #     self.bbox_cov_loss = loss_prob['bbox_cov_loss']['name']
-        #     self.bbox_cov_type = loss_prob['bbox_cov_loss']['covariance_type']
-        #     if self.bbox_cov_type == 'diagonal':
-        #         # Diagonal covariance matrix has N elements
-        #         self.bbox_cov_dims = 4
-        #     else:
-        #         # Number of elements required to describe an NxN covariance matrix is
-        #         # computed as: (N*(N+1))/2
-        #         self.bbox_cov_dims = 10
+        if self.compute_cls_var:
+            self.cls_var_loss = loss_prob['cls_var_loss']['name']
+            self.cls_var_num_samples = loss_prob['cls_var_loss']['num_samples']
+        if self.compute_bbox_cov:
+            self.bbox_cov_loss = loss_prob['bbox_cov_loss']['name']
+            self.bbox_cov_type = loss_prob['bbox_cov_loss']['covariance_type']
+            if self.bbox_cov_type == 'diagonal':
+                # Diagonal covariance matrix has N elements
+                self.bbox_cov_dims = 4
+            else:
+                # Number of elements required to describe an NxN covariance matrix is
+                # computed as: (N*(N+1))/2
+                self.bbox_cov_dims = 10
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
             in_channels,
@@ -101,12 +101,11 @@ class ProbabilisticRetinaHead(AnchorHead):
                     padding=1,
                     conv_cfg=self.conv_cfg,
                     norm_cfg=self.norm_cfg))
-            # if self.dropout_rate > 0.0:
-            #     breakpoint()
-            #     self.cls_convs.append(nn.Dropout(p=self.dropout_rate))
-            #     self.reg_convs.append(nn.Dropout(p=self.dropout_rate))
-        # self.cls_net = nn.Sequential(*self.cls_convs)
-        # self.reg_net = nn.Sequential(*self.reg_convs)
+            if self.dropout_rate > 0.0:
+                self.cls_convs.append(nn.Dropout(p=self.dropout_rate))
+                self.reg_convs.append(nn.Dropout(p=self.dropout_rate))
+        self.cls_net = nn.Sequential(*self.cls_convs)
+        self.reg_net = nn.Sequential(*self.reg_convs)
         
         self.retina_cls = nn.Conv2d(
             self.feat_channels,
@@ -117,17 +116,37 @@ class ProbabilisticRetinaHead(AnchorHead):
         self.retina_reg = nn.Conv2d(
             self.feat_channels, self.num_base_priors * 4, 3, padding=1)
         
-        # for modules in [self.retina_cls, self.retina_reg]:
-        #     for layer in modules.modules():
-        #         if isinstance(layer, nn.Conv2d):
-        #             nn.init.normal_(layer.weight, mean=0, std=0.01)
-        #             nn.init.constant_(layer.bias, 0)
+        for modules in [self.retina_cls, self.retina_reg]:
+            for layer in modules.modules():
+                if isinstance(layer, nn.Conv2d):
+                    nn.init.normal_(layer.weight, mean=0, std=0.01)
+                    nn.init.constant_(layer.bias, 0)
         
         #? Create module for classification variance estimation
-        # if self.compute_cls_var:
-        #     self.cls_var = nn.Conv2d(
-                
-        #     )
+        if self.compute_cls_var:
+            self.retina_cls_var = nn.Conv2d(
+            self.feat_channels,
+            self.num_base_priors * self.cls_out_channels,
+            3,
+            padding=1)
+            
+            for layer in self.retina_cls_var.modules():
+                if isinstance(layer, nn.Conv2d):
+                    nn.init.normal_(layer.weight, mean=0, std=0.01)
+                    nn.init.constant_(layer.bias, -10.0)
+        
+        #? Create module for bounding box covariance estimation
+        if self.compute_bbox_cov:
+            self.retina_reg_cov = nn.Conv2d(
+            self.feat_channels,
+            self.num_base_priors * self.bbox_cov_dims,
+            3,
+            padding=1)
+            
+            for layer in self.retina_reg_cov.modules():
+                if isinstance(layer, nn.Conv2d):
+                    nn.init.normal_(layer.weight, mean=0, std=0.0001)
+                    nn.init.constant_(layer.bias, 0.0)
 
     def forward_single(self, x):
         """Forward feature of a single scale level.
@@ -142,15 +161,25 @@ class ProbabilisticRetinaHead(AnchorHead):
                 bbox_pred (Tensor): Box energies / deltas for a single scale
                     level, the channels number is num_anchors * 4.
         """
-        cls_feat = x
-        reg_feat = x
-        for cls_conv in self.cls_convs:
-            cls_feat = cls_conv(cls_feat)
-        for reg_conv in self.reg_convs:
-            reg_feat = reg_conv(reg_feat)
-            
-        # cls_feat = self.cls_net(x)
-        # reg_feat = self.reg_net(x)
+        # cls_feat = x
+        # reg_feat = x
+        # for cls_conv in self.cls_convs:
+        #     cls_feat = cls_conv(cls_feat)
+        # for reg_conv in self.reg_convs:
+        #     reg_feat = reg_conv(reg_feat)
+        cls_feat = self.cls_net(x)
+        reg_feat = self.reg_net(x)
         cls_score = self.retina_cls(cls_feat)
         bbox_pred = self.retina_reg(reg_feat)
-        return cls_score, bbox_pred
+        
+        #? cls variance and bbox covariance estimation
+        if self.compute_cls_var:
+            cls_var = self.retina_cls_var(cls_feat)
+        else:
+            cls_var = None
+        if self.compute_bbox_cov:
+            bbox_cov = self.retina_reg_cov(reg_feat)
+        else:
+            bbox_cov = None
+        return cls_score, bbox_pred, cls_var, bbox_cov
+        # return cls_score, bbox_pred
