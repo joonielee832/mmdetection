@@ -41,7 +41,7 @@ class ProbabilisticRetinaHead(RetinaHead):
                  conv_cfg=None,
                  norm_cfg=None,
                  dropout_rate=0.0,
-                 loss_prob=dict(cls_var_loss=None, bbox_cov_loss=None),
+                 bbox_covariance_type="diagonal",
                  anchor_generator=dict(
                      type='AnchorGenerator',
                      octave_base_scale=4,
@@ -62,22 +62,10 @@ class ProbabilisticRetinaHead(RetinaHead):
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.dropout_rate = dropout_rate
-        self.compute_cls_var = loss_prob['cls_var_loss'] != None
-        self.compute_bbox_cov = loss_prob['bbox_cov_loss'] != None
-        
-        if self.compute_cls_var:
-            self.cls_var_loss = loss_prob['cls_var_loss']['name']
-            self.cls_var_num_samples = loss_prob['cls_var_loss']['num_samples']
-        if self.compute_bbox_cov:
-            self.bbox_cov_loss = loss_prob['bbox_cov_loss']['name']
-            self.bbox_cov_type = loss_prob['bbox_cov_loss']['covariance_type']
-            if self.bbox_cov_type == 'diagonal':
-                # Diagonal covariance matrix has N elements
-                self.bbox_cov_dims = 4
-            else:
-                # Number of elements required to describe an NxN covariance matrix is
-                # computed as: (N*(N+1))/2
-                self.bbox_cov_dims = 10
+        # Diagonal covariance matrix has N elements
+        # Number of elements required to describe an NxN covariance matrix is
+        # computed as: (N*(N+1))/2
+        self.bbox_cov_dims = 4 if bbox_covariance_type == "diagonal" else 10
 
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
@@ -136,30 +124,28 @@ class ProbabilisticRetinaHead(RetinaHead):
                     nn.init.constant_(layer.bias, 0)
         
         #? Create module for classification variance estimation
-        if self.compute_cls_var:
-            self.retina_cls_var = nn.Conv2d(
+        self.retina_cls_var = nn.Conv2d(
             self.feat_channels,
             self.num_base_priors * self.cls_out_channels,
             3,
             padding=1)
-            
-            for layer in self.retina_cls_var.modules():
-                if isinstance(layer, nn.Conv2d):
-                    nn.init.normal_(layer.weight, mean=0, std=0.01)
-                    nn.init.constant_(layer.bias, -10.0)
+        
+        for layer in self.retina_cls_var.modules():
+            if isinstance(layer, nn.Conv2d):
+                nn.init.normal_(layer.weight, mean=0, std=0.01)
+                nn.init.constant_(layer.bias, -10.0)
         
         #? Create module for bounding box covariance estimation
-        if self.compute_bbox_cov:
-            self.retina_reg_cov = nn.Conv2d(
+        self.retina_reg_cov = nn.Conv2d(
             self.feat_channels,
             self.num_base_priors * self.bbox_cov_dims,
             3,
             padding=1)
-            
-            for layer in self.retina_reg_cov.modules():
-                if isinstance(layer, nn.Conv2d):
-                    nn.init.normal_(layer.weight, mean=0, std=0.0001)
-                    nn.init.constant_(layer.bias, 0.0)
+        
+        for layer in self.retina_reg_cov.modules():
+            if isinstance(layer, nn.Conv2d):
+                nn.init.normal_(layer.weight, mean=0, std=0.0001)
+                nn.init.constant_(layer.bias, 0.0)
 
     def forward_single(self, x):
         """Forward feature of a single scale level.
@@ -173,6 +159,10 @@ class ProbabilisticRetinaHead(RetinaHead):
                     the channels number is num_anchors * num_classes.
                 bbox_pred (Tensor): Box energies / deltas for a single scale
                     level, the channels number is num_anchors * 4.
+                cls_var (Tensor): Cls variance for a single scale level
+                    the channels number is num_anchors * num_classes.
+                bbox_cov (Tensor): Box covariances for a single scale level,
+                    the channels number is num_anchors * bbox_cov_dims
         """
         cls_feat = self.cls_net(x)
         reg_feat = self.reg_net(x)
@@ -180,16 +170,10 @@ class ProbabilisticRetinaHead(RetinaHead):
         bbox_pred = self.retina_reg(reg_feat)
         
         #? cls variance and bbox covariance estimation
-        if self.compute_cls_var:
-            cls_var = self.retina_cls_var(cls_feat)
-        else:
-            cls_var = None
-        if self.compute_bbox_cov:
-            bbox_cov = self.retina_reg_cov(reg_feat)
-        else:
-            bbox_cov = None
+        cls_var = self.retina_cls_var(cls_feat)
+        bbox_cov = self.retina_reg_cov(reg_feat)
+
         return cls_score, bbox_pred, cls_var, bbox_cov
-        # return cls_score, bbox_pred
 
     def forward(self, feats):
         """Forward features from the upstream network.
@@ -226,6 +210,10 @@ class ProbabilisticRetinaHead(RetinaHead):
                 Has shape (N, num_anchors * num_classes, H, W).
             bbox_pred (Tensor): Box energies / deltas for each scale
                 level with shape (N, num_anchors * 4, H, W).
+            cls_var (Tensor): Box class variance for each scale level
+                Has shape (N, num_anchors * num_classes, H, W).
+            bbox_cov (Tensor): Box corner covariance for each scale
+                level with shape (N, num_anchors * self.bbox_cov_dims, H, W).
             anchors (Tensor): Box reference for each scale level with shape
                 (N, num_total_anchors, 4).
             labels (Tensor): Labels of each anchors with shape
@@ -248,20 +236,29 @@ class ProbabilisticRetinaHead(RetinaHead):
         label_weights = label_weights.reshape(-1)
         cls_score = cls_score.permute(0, 2, 3,
                                       1).reshape(-1, self.cls_out_channels)
+        if cls_var is not None:
+            cls_var = cls_var.permute(0, 2, 3,
+                                      1).reshape(-1, self.cls_out_channels)
         loss_cls = self.loss_cls(
-            cls_score, labels, label_weights, avg_factor=num_total_samples)
+            cls_score, cls_var, labels, label_weights, avg_factor=num_total_samples)
+        
         # regression loss
         bbox_targets = bbox_targets.reshape(-1, 4)
         bbox_weights = bbox_weights.reshape(-1, 4)
         bbox_pred = bbox_pred.permute(0, 2, 3, 1).reshape(-1, 4)
+        if bbox_cov is not None:
+            bbox_cov = bbox_cov.permute(0, 2, 3, 1).reshape(-1, self.bbox_cov_dims)
         if self.reg_decoded_bbox:
             # When the regression loss (e.g. `IouLoss`, `GIouLoss`)
             # is applied directly on the decoded bounding boxes, it
             # decodes the already encoded coordinates to absolute format.
             anchors = anchors.reshape(-1, 4)
             bbox_pred = self.bbox_coder.decode(anchors, bbox_pred)
+            #! Decoding not implemented for bbox covariance for IouLoss
+            raise NotImplementedError("Decoding not implemented for bbox covariance for other reg losses")
         loss_bbox = self.loss_bbox(
             bbox_pred,
+            bbox_cov,
             bbox_targets,
             bbox_weights,
             avg_factor=num_total_samples)
@@ -288,7 +285,7 @@ class ProbabilisticRetinaHead(RetinaHead):
             cls_vars (list[Tensor]): Box score variances for each scale level
                 Has shape (N, num_anchors * num_classes, H, W)
             bbox_covs (list[Tensor]): Box covariances for each scale
-                level with shape (N, num_anchors * 4, H, W)
+                level with shape (N, num_anchors * bbox_cov_dims, H, W)
             gt_bboxes (list[Tensor]): Ground truth bboxes for each image with
                 shape (num_gts, 4) in [tl_x, tl_y, br_x, br_y] format.
             gt_labels (list[Tensor]): class indices corresponding to each box
@@ -304,9 +301,11 @@ class ProbabilisticRetinaHead(RetinaHead):
         assert len(featmap_sizes) == self.prior_generator.num_levels
 
         device = cls_scores[0].device
-
+        breakpoint()
+        # first: [4, 90, 92, 160]
         anchor_list, valid_flag_list = self.get_anchors(
             featmap_sizes, img_metas, device=device)
+        breakpoint()
         label_channels = self.cls_out_channels if self.use_sigmoid_cls else 1
         cls_reg_targets = self.get_targets(
             anchor_list,
