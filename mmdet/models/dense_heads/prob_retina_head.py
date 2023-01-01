@@ -66,6 +66,7 @@ class ProbabilisticRetinaHead(RetinaHead):
         # Number of elements required to describe an NxN covariance matrix is
         # computed as: (N*(N+1))/2
         self.bbox_cov_dims = 4 if bbox_covariance_type == "diagonal" else 10
+        self.current_step = 0
 
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
@@ -105,8 +106,6 @@ class ProbabilisticRetinaHead(RetinaHead):
             if self.dropout_rate > 0.0:
                 self.cls_convs.append(nn.Dropout(p=self.dropout_rate))
                 self.reg_convs.append(nn.Dropout(p=self.dropout_rate))
-        self.cls_net = nn.Sequential(*self.cls_convs)
-        self.reg_net = nn.Sequential(*self.reg_convs)
         
         self.retina_cls = nn.Conv2d(
             self.feat_channels,
@@ -164,8 +163,12 @@ class ProbabilisticRetinaHead(RetinaHead):
                 bbox_cov (Tensor): Box covariances for a single scale level,
                     the channels number is num_anchors * bbox_cov_dims
         """
-        cls_feat = self.cls_net(x)
-        reg_feat = self.reg_net(x)
+        cls_feat = x
+        reg_feat = x
+        for cls_conv in self.cls_convs:
+            cls_feat = cls_conv(cls_feat)
+        for reg_conv in self.reg_convs:
+            reg_feat = reg_conv(reg_feat)
         cls_score = self.retina_cls(cls_feat)
         bbox_pred = self.retina_reg(reg_feat)
         
@@ -198,9 +201,9 @@ class ProbabilisticRetinaHead(RetinaHead):
                     levels, each is a 4-D tensor, the channels number is \
                     num_base_priors * bbox_cov_dims (4)
         """
+        self.current_step += 1
         return multi_apply(self.forward_single, feats)
     
-    #TODO: loss_single function overwrite from anchor_head
     def loss_single(self, cls_score, bbox_pred, cls_var, bbox_cov, anchors, labels, label_weights,
                     bbox_targets, bbox_weights, num_total_samples):
         """Compute loss of a single scale level.
@@ -260,11 +263,11 @@ class ProbabilisticRetinaHead(RetinaHead):
             bbox_pred,
             bbox_cov,
             bbox_targets,
+            self.current_step,
             bbox_weights,
             avg_factor=num_total_samples)
-        return loss_cls, loss_bbox, None, None
+        return loss_cls, loss_bbox
     
-    #TODO: loss function overwrite from anchor_head
     @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'cls_vars', 'bbox_covs'))
     def loss(self,
              cls_scores,
@@ -301,11 +304,8 @@ class ProbabilisticRetinaHead(RetinaHead):
         assert len(featmap_sizes) == self.prior_generator.num_levels
 
         device = cls_scores[0].device
-        breakpoint()
-        # first: [4, 90, 92, 160]
         anchor_list, valid_flag_list = self.get_anchors(
             featmap_sizes, img_metas, device=device)
-        breakpoint()
         label_channels = self.cls_out_channels if self.use_sigmoid_cls else 1
         cls_reg_targets = self.get_targets(
             anchor_list,
@@ -331,7 +331,7 @@ class ProbabilisticRetinaHead(RetinaHead):
         all_anchor_list = images_to_levels(concat_anchor_list,
                                            num_level_anchors)
 
-        losses_cls, losses_bbox, losses_cls_vars, losses_bbox_covs = multi_apply(
+        losses_cls, losses_bbox = multi_apply(
             self.loss_single,
             cls_scores,
             bbox_preds,
@@ -344,11 +344,5 @@ class ProbabilisticRetinaHead(RetinaHead):
             bbox_weights_list,
             num_total_samples=num_total_samples)
         
-        #! Remove
-        losses_cls_vars = [torch.ones_like(l_cls) for l_cls in losses_cls]
-        losses_bbox_covs = [torch.ones_like(l_bbox) for l_bbox in losses_bbox]
-        
         return dict(loss_cls_score=losses_cls, 
-                    loss_bbox_reg=losses_bbox, 
-                    loss_cls_var=losses_cls_vars, 
-                    loss_bbox_cov=losses_bbox_covs)
+                    loss_bbox_reg=losses_bbox)

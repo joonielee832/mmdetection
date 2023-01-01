@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..builder import LOSSES
-from .utils import weight_reduce_loss
 from .focal_loss import sigmoid_focal_loss, py_sigmoid_focal_loss, py_focal_loss_with_prob
 
 @LOSSES.register_module()
