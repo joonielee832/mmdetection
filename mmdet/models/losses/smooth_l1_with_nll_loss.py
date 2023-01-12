@@ -69,7 +69,7 @@ class SmoothL1WithNLL(nn.Module):
         loss_cov_reg = 0.5 * pred_cov
         loss_bbox += loss_cov_reg
 
-        loss_bbox = weight_reduce_loss(loss_bbox, torch.ones_like(loss_bbox), reduction, avg_factor)
+        loss_bbox = weight_reduce_loss(loss_bbox, weight, reduction, avg_factor)
         
         #? Perform loss annealing
         standard_loss_bbox = smooth_l1_loss(
