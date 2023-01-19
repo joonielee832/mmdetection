@@ -533,6 +533,8 @@ class MMDetWandbHook(WandbLoggerHook):
         """
         mask_label_dict = dict()
         for mask, label in zip(masks, labels):
+            if mask is None:
+                continue
             label = label + 1
             # Get bitmap mask from polygon.
             if is_poly_mask:
@@ -557,7 +559,8 @@ class MMDetWandbHook(WandbLoggerHook):
                 'mask_data': value,
                 'class_labels': self.class_id_to_label
             }
-
+        if len(wandb_masks) == 0:
+            return None
         return wandb_masks
 
     def _log_data_table(self):
