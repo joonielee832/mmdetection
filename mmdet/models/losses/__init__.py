@@ -19,7 +19,7 @@ from .smooth_l1_loss import L1Loss, SmoothL1Loss, l1_loss, smooth_l1_loss
 from .utils import reduce_loss, weight_reduce_loss, weighted_loss
 from .varifocal_loss import VarifocalLoss
 from .focal_attenuation_loss import FocalAttenuatedLoss
-from .smooth_l1_with_nll_loss import SmoothL1WithNLL
+from .smooth_l1_with_nll_loss import SmoothL1WithNLL, L1WithNLL
 
 __all__ = [
     'accuracy', 'Accuracy', 'cross_entropy', 'binary_cross_entropy',
@@ -31,5 +31,5 @@ __all__ = [
     'l1_loss', 'isr_p', 'carl_loss', 'AssociativeEmbeddingLoss',
     'GaussianFocalLoss', 'QualityFocalLoss', 'DistributionFocalLoss',
     'VarifocalLoss', 'KnowledgeDistillationKLDivLoss', 'SeesawLoss', 'DiceLoss',
-    'FocalAttenuatedLoss', 'SmoothL1WithNLL'
+    'FocalAttenuatedLoss', 'L1WithNLL', 'SmoothL1WithNLL'
 ]
