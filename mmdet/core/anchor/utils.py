@@ -17,6 +17,30 @@ def images_to_levels(target, num_levels):
         start = end
     return level_targets
 
+def images_to_levels_pos_mask(target, num_levels, pos_inds_list):
+    """Convert targets by image to targets by feature level.
+
+    [target_img0, target_img1] -> [target_level0, target_level1, ...]
+    """
+    target = torch.stack(target, 0)
+    pos_masks = torch.zeros_like(target)
+    assert pos_masks.shape[0] == len(pos_inds_list), "Positive mask shape different than list"
+    
+    for i, pos_inds in enumerate(pos_inds_list):
+        pos_masks[i][pos_inds] += 1
+    
+    level_targets = []
+    level_pos_masks = []
+    start = 0
+    for n in num_levels:
+        end = start + n
+        level_target = target[:, start:end] #target: (N, ..., 1 or 4)
+        level_pos_mask = pos_masks[:, start:end]
+        level_targets.append(level_target)
+        level_pos_masks.append(level_pos_mask)
+        start = end
+    return level_targets, level_pos_masks
+
 
 def anchor_inside_flags(flat_anchors,
                         valid_flags,
