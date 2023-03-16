@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from mmcv.runner import force_fp32
+from mmcv.cnn.utils import xavier_init
 from mmcv.cnn import ConvModule
 from mmcv.ops import batched_nms
 
@@ -38,6 +39,7 @@ class ProbabilisticRetinaHead(RetinaHead):
                  dropout_rate=0.0,
                  bbox_covariance_type="diagonal",
                  use_pos_mask=False,
+                 with_nms=True,
                  anchor_generator=dict(
                      type='AnchorGenerator',
                      octave_base_scale=4,
@@ -64,6 +66,7 @@ class ProbabilisticRetinaHead(RetinaHead):
         # computed as: (N*(N+1))/2
         self.bbox_cov_dims = 4 if bbox_covariance_type == "diagonal" else 10
         self.current_step = 0
+        self.with_nms = with_nms
 
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
@@ -113,23 +116,12 @@ class ProbabilisticRetinaHead(RetinaHead):
         self.retina_reg = nn.Conv2d(
             self.feat_channels, self.num_base_priors * 4, 3, padding=1)
         
-        for modules in [self.retina_cls, self.retina_reg]:
-            for layer in modules.modules():
-                if isinstance(layer, nn.Conv2d):
-                    nn.init.normal_(layer.weight, mean=0, std=0.01)
-                    nn.init.constant_(layer.bias, 0)
-        
         #? Create module for classification variance estimation
         self.retina_cls_var = nn.Conv2d(
             self.feat_channels,
             self.num_base_priors * self.cls_out_channels,
             3,
             padding=1)
-        
-        for layer in self.retina_cls_var.modules():
-            if isinstance(layer, nn.Conv2d):
-                nn.init.normal_(layer.weight, mean=0, std=0.01)
-                nn.init.constant_(layer.bias, -10.0)
         
         #? Create module for bounding box covariance estimation
         self.retina_reg_cov = nn.Conv2d(
@@ -138,10 +130,19 @@ class ProbabilisticRetinaHead(RetinaHead):
             3,
             padding=1)
         
-        for layer in self.retina_reg_cov.modules():
-            if isinstance(layer, nn.Conv2d):
-                nn.init.normal_(layer.weight, mean=0, std=0.00001)
-                nn.init.constant_(layer.bias, 0)
+        #? Initialize retina_cls, retina_reg, retina_cls_var and retina_reg_cov modules
+        #? init_weights may not be called if the model is loaded from pretrained weights
+        if isinstance(self.init_cfg, dict):
+            for m in [self.retina_cls, self.retina_reg]:
+                xavier_init(m, bias=0.0)
+            if hasattr(self.init_cfg, "override"):
+                override_init_cfg = self.init_cfg.override
+                if override_init_cfg is not None and isinstance(override_init_cfg, list):
+                    for _init in override_init_cfg:
+                        if _init.name == "retina_cls_var":
+                            xavier_init(self.retina_cls_var, bias=_init.bias)
+                        elif _init.name == "retina_reg_cov":
+                            xavier_init(self.retina_reg_cov, bias=_init.bias)
 
     def forward_single(self, x):
         """Forward feature of a single scale level.
