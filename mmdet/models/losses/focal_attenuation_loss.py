@@ -13,6 +13,7 @@ class FocalAttenuatedLoss(nn.Module):
                  gamma=2.0,
                  alpha=0.25,
                  reduction='mean',
+                 attenuated=False,
                  loss_weight=1.0,
                  num_samples=10,
                  activated=False):
@@ -43,11 +44,13 @@ class FocalAttenuatedLoss(nn.Module):
         self.loss_weight = loss_weight
         self.activated = activated
         self.num_samples = num_samples
+        self.attenuated = attenuated
 
     def forward(self,
                 pred,
                 pred_var,
                 target,
+                attenuated_weight=1.0,
                 weight=None,
                 avg_factor=None,
                 reduction_override=None):
@@ -55,8 +58,9 @@ class FocalAttenuatedLoss(nn.Module):
 
         Args:
             pred (torch.Tensor): The prediction.
-            pred (torch.Tensor): The predicted variance
+            pred_var (torch.Tensor): The predicted variance
             target (torch.Tensor): The learning label of the prediction.
+            attenuated_weight (float, optional): The weight of the attenuated loss.
             weight (torch.Tensor, optional): The weight of loss for each
                 prediction. Defaults to None.
             avg_factor (int, optional): Average factor that is used to average
@@ -83,7 +87,7 @@ class FocalAttenuatedLoss(nn.Module):
                     target = F.one_hot(target, num_classes=num_classes + 1)
                     target = target[:, :num_classes]
                     calculate_loss_func = py_sigmoid_focal_loss
-
+            
             #? Produce normal samples using logits as the mean and std computed above
             pred_var = torch.sqrt(torch.exp(pred_var))
             univ_norm_dists = torch.distributions.normal.Normal(pred, scale=pred_var)
@@ -91,21 +95,33 @@ class FocalAttenuatedLoss(nn.Module):
             pred_stochastic = pred_stochastic.reshape(pred_stochastic.shape[1]*self.num_samples,pred_stochastic.shape[2])
             
             #? Produce copies of the target classes to match the number of samples
-            target = torch.unsqueeze(target, 0)
-            target = torch.repeat_interleave(target, self.num_samples, dim=0).reshape(target.shape[1]*self.num_samples)
-            weight = torch.unsqueeze(weight, 0)
-            weight = torch.repeat_interleave(weight, self.num_samples, dim=0).reshape(weight.shape[1]*self.num_samples)
+            target_stochastic = torch.unsqueeze(target, 0)
+            target_stochastic = torch.repeat_interleave(target_stochastic, self.num_samples, dim=0).reshape(target_stochastic.shape[1]*self.num_samples)
+            weight_stochastic = torch.unsqueeze(weight, 0)
+            weight_stochastic = torch.repeat_interleave(weight_stochastic, self.num_samples, dim=0).reshape(weight_stochastic.shape[1]*self.num_samples)
             
-            avg_factor *= self.num_samples
-            loss_cls = self.loss_weight * calculate_loss_func(
+            avg_factor_stochastic = avg_factor * self.num_samples
+            loss_cls = calculate_loss_func(
                 pred_stochastic,
-                target,
-                weight,
+                target_stochastic,
+                weight_stochastic,
                 gamma=self.gamma,
                 alpha=self.alpha,
                 reduction=reduction,
-                avg_factor=avg_factor)
+                avg_factor=avg_factor_stochastic)
+            
+            #? Compute standard focal loss if attenuated
+            if self.attenuated:
+                standard_loss_cls = calculate_loss_func(pred,
+                                                        target,
+                                                        weight,
+                                                        gamma=self.gamma,
+                                                        alpha=self.alpha,
+                                                        reduction=reduction,
+                                                        avg_factor=avg_factor)
+                loss_cls =  (1 - attenuated_weight) * standard_loss_cls + \
+                            attenuated_weight * loss_cls
 
         else:
             raise NotImplementedError
-        return loss_cls
+        return self.loss_weight * loss_cls

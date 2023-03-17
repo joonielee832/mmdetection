@@ -33,6 +33,8 @@ class ProbabilisticRetinaHead(RetinaHead):
     def __init__(self,
                  num_classes,
                  in_channels,
+                 epoch_step,
+                 iters_in_epoch,
                  stacked_convs=4,
                  conv_cfg=None,
                  norm_cfg=None,
@@ -65,8 +67,11 @@ class ProbabilisticRetinaHead(RetinaHead):
         # Number of elements required to describe an NxN covariance matrix is
         # computed as: (N*(N+1))/2
         self.bbox_cov_dims = 4 if bbox_covariance_type == "diagonal" else 10
-        self.current_step = 0
         self.with_nms = with_nms
+        self.current_iter = 0
+        self.current_epoch = 0
+        self.epoch_step = epoch_step
+        self.iters_in_epoch = iters_in_epoch
 
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
@@ -106,7 +111,7 @@ class ProbabilisticRetinaHead(RetinaHead):
             if self.dropout_rate > 0.0:
                 self.cls_convs.append(nn.Dropout(p=self.dropout_rate))
                 self.reg_convs.append(nn.Dropout(p=self.dropout_rate))
-        
+                
         self.retina_cls = nn.Conv2d(
             self.feat_channels,
             self.num_base_priors * self.cls_out_channels,
@@ -199,7 +204,6 @@ class ProbabilisticRetinaHead(RetinaHead):
                     levels, each is a 4-D tensor, the channels number is \
                     num_base_priors * bbox_cov_dims (4)
         """
-        self.current_step += 1
         return multi_apply(self.forward_single, feats)
     
     def get_targets(self,
@@ -346,16 +350,19 @@ class ProbabilisticRetinaHead(RetinaHead):
         Returns:
             dict[str, Tensor]: A dictionary of loss components.
         """
+        #? Calculate weight factor for attenuated loss
+        attenuated_weight = self.current_epoch / self.epoch_step + \
+                        ((self.current_iter+1) % self.iters_in_epoch) / self.iters_in_epoch
+        attenuated_weight = min(attenuated_weight, 1.0)
+        
         # classification loss
         labels = labels.reshape(-1)
         label_weights = label_weights.reshape(-1)
-        cls_score = cls_score.permute(0, 2, 3,
-                                      1).reshape(-1, self.cls_out_channels)
+        cls_score = cls_score.permute(0, 2, 3, 1).reshape(-1, self.cls_out_channels)
         if cls_var is not None:
-            cls_var = cls_var.permute(0, 2, 3,
-                                      1).reshape(-1, self.cls_out_channels)
+            cls_var = cls_var.permute(0, 2, 3, 1).reshape(-1, self.cls_out_channels)
         loss_cls = self.loss_cls(
-            cls_score, cls_var, labels, label_weights, avg_factor=num_total_samples)
+            cls_score, cls_var, labels, attenuated_weight, label_weights, avg_factor=num_total_samples)
         
         # regression loss
         bbox_targets = bbox_targets.reshape(-1, 4)
@@ -382,7 +389,7 @@ class ProbabilisticRetinaHead(RetinaHead):
             bbox_pred,
             bbox_cov,
             bbox_targets,
-            self.current_step,
+            attenuated_weight,
             bbox_weights,
             avg_factor=num_total_samples)
         return loss_cls, loss_bbox
