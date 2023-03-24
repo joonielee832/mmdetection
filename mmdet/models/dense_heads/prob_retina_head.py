@@ -471,8 +471,8 @@ class ProbabilisticRetinaHead(RetinaHead):
             bbox_weights_list,
             num_total_samples=num_total_samples)
         
-        return dict(loss_cls_score=losses_cls, 
-                    loss_bbox_reg=losses_bbox)
+        return dict(loss_cls=losses_cls, 
+                    loss_bbox=losses_bbox)
         
     def simple_test(self, feats, img_metas, rescale=False):
         """Test function without test-time augmentation.

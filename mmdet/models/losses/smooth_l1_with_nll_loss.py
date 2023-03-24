@@ -147,7 +147,7 @@ class L1WithNLL(nn.Module):
             **kwargs)
         loss_cov_reg = 0.5 * pred_cov
         loss_bbox += loss_cov_reg
-        breakpoint()
+
         loss_bbox = weight_reduce_loss(loss_bbox, weight, reduction, avg_factor)    #! different from pod_compare;
         
         #? Perform loss annealing
