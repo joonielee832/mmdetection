@@ -164,6 +164,41 @@ def filter_scores_and_topk(scores, score_thr, topk, results=None):
                                       f'but get {type(results)}.')
     return scores, labels, keep_idxs, filtered_results
 
+def compute_mean_covariance_torch(input_samples):
+    """
+    Function for efficient computation of mean and covariance matrix in pytorch.
+
+    Args:
+        input_samples(list): list of tensors from M stochastic monte-carlo sampling runs, each containing N x k tensors.
+
+    Returns:
+        predicted_mean(Tensor): an Nxk tensor containing the predicted mean.
+        predicted_covariance(Tensor): an Nxkxk tensor containing the predicted covariance matrix.
+
+    """
+    if isinstance(input_samples, torch.Tensor):
+        num_samples = input_samples.shape[2]
+    else:
+        num_samples = len(input_samples)
+        input_samples = torch.stack(input_samples, 2)
+
+    # Compute Mean
+    predicted_mean = torch.mean(input_samples, 2, keepdim=True)
+
+    # Compute Covariance
+    residuals = torch.transpose(
+        torch.unsqueeze(
+            input_samples -
+            predicted_mean,
+            1),
+        1,
+        3)
+    predicted_covariance = torch.matmul(
+        residuals, torch.transpose(residuals, 3, 2))
+    predicted_covariance = torch.sum(
+        predicted_covariance, 1) / (num_samples - 1)
+
+    return predicted_mean.squeeze(2), predicted_covariance
 
 def center_of_mass(mask, esp=1e-6):
     """Calculate the centroid coordinates of the mask.

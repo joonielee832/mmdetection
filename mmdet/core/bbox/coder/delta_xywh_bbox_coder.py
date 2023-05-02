@@ -236,10 +236,12 @@ def delta2bbox(rois,
 
     # Compute width/height of each roi
     rois_ = rois.repeat(1, num_classes).reshape(-1, 4)
-    pxy = ((rois_[:, :2] + rois_[:, 2:]) * 0.5)
-    pwh = (rois_[:, 2:] - rois_[:, :2])
+    #* rois are (x1,y1,x2,y2)
+    pxy = ((rois_[:, :2] + rois_[:, 2:]) * 0.5) #* center of rois
+    pwh = (rois_[:, 2:] - rois_[:, :2]) #* width and height of rois
 
-    dxy_wh = pwh * dxy
+    #? Scale by width/height of rois
+    dxy_wh = pwh * dxy  # scaling mean
 
     max_ratio = np.abs(np.log(wh_ratio_clip))
     if add_ctr_clamp:
@@ -248,8 +250,9 @@ def delta2bbox(rois,
     else:
         dwh = dwh.clamp(min=-max_ratio, max=max_ratio)
 
-    gxy = pxy + dxy_wh
-    gwh = pwh * dwh.exp()
+    gxy = pxy + dxy_wh  #* center of bboxes
+    gwh = pwh * dwh.exp()   #* width and height of bboxes; dwh are in log-space
+    
     x1y1 = gxy - (gwh * 0.5)
     x2y2 = gxy + (gwh * 0.5)
     bboxes = torch.cat([x1y1, x2y2], dim=-1)

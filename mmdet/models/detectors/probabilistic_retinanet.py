@@ -38,14 +38,12 @@ class ProbabilisticRetinaNet(RetinaNet):
                 The outer list corresponds to each image. The inner list
                 corresponds to each class.
         """
-        # breakpoint()
         feat = self.extract_feat(img)
-        # breakpoint()
         results_list = self.bbox_head.simple_test(
             feat, img_metas, rescale=rescale)
         bbox_results = [
             bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-            for det_bboxes, det_labels in results_list
+            for det_bboxes, det_bbox_covs, det_labels in results_list
         ]
         return bbox_results
 

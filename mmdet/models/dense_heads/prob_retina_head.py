@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from mmcv.runner import force_fp32
 from mmcv.cnn.utils import xavier_init, normal_init
 from mmcv.cnn import ConvModule
 from mmcv.ops import batched_nms
 
-from mmdet.core import (images_to_levels, images_to_levels_pos_mask, multi_apply)
-from mmdet.core.utils import filter_scores_and_topk, select_single_mlvl
+from mmdet.core import (images_to_levels, images_to_levels_pos_mask, multi_apply, BboxOverlaps2D)
+from mmdet.core.utils import filter_scores_and_topk, select_single_mlvl, compute_mean_covariance_torch
 from ..builder import HEADS
 from .retina_head import RetinaHead
 
@@ -42,6 +43,7 @@ class ProbabilisticRetinaHead(RetinaHead):
                  bbox_covariance_type="diagonal",
                  use_pos_mask=False,
                  with_nms=True,
+                 affinity_thr=0.9,
                  anchor_generator=dict(
                      type='AnchorGenerator',
                      octave_base_scale=4,
@@ -68,10 +70,13 @@ class ProbabilisticRetinaHead(RetinaHead):
         # computed as: (N*(N+1))/2
         self.bbox_cov_dims = 4 if bbox_covariance_type == "diagonal" else 10
         self.with_nms = with_nms
+        self.affinity_thr = affinity_thr
         self.current_iter = 0
         self.current_epoch = 0
         self.epoch_step = epoch_step
         self.iters_in_epoch = iters_in_epoch
+        
+        self.iou_calc = BboxOverlaps2D()
 
         super(ProbabilisticRetinaHead, self).__init__(
             num_classes,
@@ -510,7 +515,6 @@ class ProbabilisticRetinaHead(RetinaHead):
                    img_metas=None,
                    cfg=None,
                    rescale=False,
-                   with_nms=True,
                    **kwargs):
         """Transform network outputs of a batch into bbox results.
 
@@ -568,14 +572,16 @@ class ProbabilisticRetinaHead(RetinaHead):
             img_meta = img_metas[img_id]
             cls_score_list = select_single_mlvl(cls_scores, img_id)
             bbox_pred_list = select_single_mlvl(bbox_preds, img_id)
+            bbox_cov_list = select_single_mlvl(bbox_covs, img_id)
             if with_score_factors:
                 score_factor_list = select_single_mlvl(score_factors, img_id)
             else:
                 score_factor_list = [None for _ in range(num_levels)]
 
             results = self._get_bboxes_single(cls_score_list, bbox_pred_list,
+                                              bbox_cov_list,
                                               score_factor_list, mlvl_priors,
-                                              img_meta, cfg, rescale, with_nms,
+                                              img_meta, cfg, rescale, self.with_nms,
                                               **kwargs)
             result_list.append(results)
         return result_list
@@ -583,6 +589,7 @@ class ProbabilisticRetinaHead(RetinaHead):
     def _get_bboxes_single(self,
                            cls_score_list,
                            bbox_pred_list,
+                           bbox_cov_list,
                            score_factor_list,
                            mlvl_priors,
                            img_meta,
@@ -642,19 +649,22 @@ class ProbabilisticRetinaHead(RetinaHead):
         nms_pre = cfg.get('nms_pre', -1)
 
         mlvl_bboxes = []
+        mlvl_bbox_covs = []
         mlvl_scores = []
         mlvl_labels = []
         if with_score_factors:
             mlvl_score_factors = []
         else:
             mlvl_score_factors = None
-        for level_idx, (cls_score, bbox_pred, score_factor, priors) in \
-                enumerate(zip(cls_score_list, bbox_pred_list,
+        for level_idx, (cls_score, bbox_pred, bbox_cov, score_factor, priors) in \
+                enumerate(zip(cls_score_list, bbox_pred_list, bbox_cov_list,
                               score_factor_list, mlvl_priors)):
 
             assert cls_score.size()[-2:] == bbox_pred.size()[-2:]
 
             bbox_pred = bbox_pred.permute(1, 2, 0).reshape(-1, 4)
+            bbox_cov = bbox_cov.permute(1, 2, 0).reshape(-1, 4)
+            
             if with_score_factors:
                 score_factor = score_factor.permute(1, 2,
                                                     0).reshape(-1).sigmoid()
@@ -675,33 +685,71 @@ class ProbabilisticRetinaHead(RetinaHead):
             # `nms_pre` than before.
             results = filter_scores_and_topk(
                 scores, cfg.score_thr, nms_pre,
-                dict(bbox_pred=bbox_pred, priors=priors))
+                dict(bbox_pred=bbox_pred, bbox_cov=bbox_cov, priors=priors))
             scores, labels, keep_idxs, filtered_results = results
 
             bbox_pred = filtered_results['bbox_pred']
             priors = filtered_results['priors']
+            bbox_cov = filtered_results['bbox_cov']
 
             if with_score_factors:
                 score_factor = score_factor[keep_idxs]
-
-            bboxes = self.bbox_coder.decode(
-                priors, bbox_pred, max_shape=img_shape)
+                
+            if bbox_pred.numel() > 0:
+                #? Construct cholesky decomposition of covariance matrix
+                std = torch.sqrt(torch.exp(bbox_cov))
+                predicted_cov_chol = torch.diag_embed(std)
+                
+                #? Monte-Carlo sampling of predicted deltas and covariances
+                mvn = torch.distributions.MultivariateNormal(
+                    bbox_pred, scale_tril=predicted_cov_chol)
+                delta_samples = mvn.rsample((1000,))    # (1000, N, 4)
+                # delta_samples = delta_samples.permute(1,2,0) # (N, 4, 1000)
+                priors_repeated = torch.repeat_interleave(priors.unsqueeze(0), 1000, dim=0) # (1000, N, 4)
+                
+                #? Get bboxes from the bbox deltas and priors
+                bboxes_samples = self.bbox_coder.decode(
+                    priors_repeated, delta_samples, max_shape=img_shape)
+                bboxes_samples = bboxes_samples.permute(1,2,0) # (N, 4, 1000)
+                bboxes, bbox_covs = compute_mean_covariance_torch(bboxes_samples)
+            else:
+                bboxes = self.bbox_coder.decode(priors, bbox_pred, max_shape=img_shape)
+                bbox_covs = torch.diag_embed(torch.exp(bbox_cov))
 
             mlvl_bboxes.append(bboxes)
             mlvl_scores.append(scores)
             mlvl_labels.append(labels)
+            mlvl_bbox_covs.append(bbox_covs)
             if with_score_factors:
                 mlvl_score_factors.append(score_factor)
 
         return self._bbox_post_process(mlvl_scores, mlvl_labels, mlvl_bboxes,
-                                       img_meta['scale_factor'], cfg, rescale,
-                                       with_nms, mlvl_score_factors, **kwargs)
+                                       mlvl_bbox_covs, img_meta['scale_factor'], 
+                                       cfg, rescale, with_nms, mlvl_score_factors, 
+                                       **kwargs)
+    def _bbox_bayesian_inference(self,
+                                 cluster_means,
+                                 cluster_covs):
+        """
+        Args:
+            cluster_means (nd array): cluster box means.
+            cluster_covs (nd array): cluster box covariance matrices.
+        Returns:
+            final_mean (nd array): cluster fused mean.
+            final_cov (nd array): cluster fused covariance matrix.
+        """
+        cluster_precs = np.linalg.inv(cluster_covs)
+        final_cov = np.linalg.inv(cluster_precs.sum(0))
+        final_mean = np.matmul(
+            cluster_precs, np.expand_dims(cluster_means, 2)).sum(0)
+        final_mean = np.squeeze(np.matmul(final_cov, final_mean))
+        return final_mean, final_cov
 
-    #TODO: Modify with_nms
     def _bbox_post_process(self,
                            mlvl_scores,
                            mlvl_labels,
                            mlvl_bboxes,
+                           mlvl_bbox_covs,
                            scale_factor,
                            cfg,
                            rescale=False,
@@ -748,11 +796,31 @@ class ProbabilisticRetinaHead(RetinaHead):
                 - det_labels (Tensor): Predicted labels of the corresponding \
                     box with shape [num_bboxes].
         """
-        assert len(mlvl_scores) == len(mlvl_bboxes) == len(mlvl_labels)
+        assert len(mlvl_scores) == len(mlvl_bboxes) == len(mlvl_labels) == len(mlvl_bbox_covs)
 
         mlvl_bboxes = torch.cat(mlvl_bboxes)
+        mlvl_bbox_covs = torch.cat(mlvl_bbox_covs)
+
+        #? Rescale bboxes to the original image size
         if rescale:
-            mlvl_bboxes /= mlvl_bboxes.new_tensor(scale_factor)
+            mlvl_bboxes /= mlvl_bboxes.new_tensor(scale_factor) # (N, 4)
+            
+            #? Rescale covariance matrix
+            # Add small value to make sure covariance matrix is well conditioned
+            mlvl_bbox_covs = mlvl_bbox_covs + 1e-9 * torch.eye(mlvl_bbox_covs.shape[2], 
+                                                               device=mlvl_bbox_covs.device)    # (N, 4, 4)
+            scale_mat = torch.diag_embed(
+                torch.ones(mlvl_bbox_covs.shape[2], device=mlvl_bbox_covs.device) * \
+                    torch.from_numpy(scale_factor).to(mlvl_bbox_covs.device)
+            ).unsqueeze(0)
+            scale_mat = torch.repeat_interleave(
+                scale_mat, mlvl_bbox_covs.shape[0], 0)
+            mlvl_bbox_covs = torch.matmul(
+                torch.matmul(
+                    scale_mat,
+                    mlvl_bbox_covs),
+                torch.transpose(scale_mat, 2, 1))   # (N, 4, 4)
+
         mlvl_scores = torch.cat(mlvl_scores)
         mlvl_labels = torch.cat(mlvl_labels)
 
@@ -762,15 +830,58 @@ class ProbabilisticRetinaHead(RetinaHead):
             mlvl_score_factors = torch.cat(mlvl_score_factors)
             mlvl_scores = mlvl_scores * mlvl_score_factors
 
+        if mlvl_bboxes.numel() == 0:
+            det_bboxes = torch.cat([mlvl_bboxes, mlvl_scores[:, None]], -1)
+            return det_bboxes, mlvl_bbox_covs, mlvl_labels
+        
         if with_nms:
-            if mlvl_bboxes.numel() == 0:
-                det_bboxes = torch.cat([mlvl_bboxes, mlvl_scores[:, None]], -1)
-                return det_bboxes, mlvl_labels
-
+            #? NMS
             det_bboxes, keep_idxs = batched_nms(mlvl_bboxes, mlvl_scores,
                                                 mlvl_labels, cfg.nms)
             det_bboxes = det_bboxes[:cfg.max_per_img]
+            det_bbox_covs = mlvl_bbox_covs[keep_idxs][:cfg.max_per_img]
             det_labels = mlvl_labels[keep_idxs][:cfg.max_per_img]
-            return det_bboxes, det_labels
+            return det_bboxes, det_bbox_covs, det_labels
         else:
-            return mlvl_bboxes, mlvl_scores, mlvl_labels
+            _, keep_idxs = batched_nms(mlvl_bboxes, mlvl_scores, 
+                                       mlvl_labels, cfg.nms)
+            keep_idxs = keep_idxs[:cfg.max_per_img]
+            
+            #? Cluster bboxes
+            ious = self.iou_calc(mlvl_bboxes, mlvl_bboxes)
+            box_cluster_idxs = ious[keep_idxs,:]
+            box_cluster_idxs = box_cluster_idxs > self.affinity_thr
+            
+            #? Compute mean and covariance for every cluster.
+
+            predicted_prob_vectors_list = []
+            predicted_boxes_list = []
+            predicted_boxes_covariance_list = []
+
+            if len(mlvl_scores.shape) == 1:
+                mlvl_scores = mlvl_scores.unsqueeze(-1)
+            predicted_prob_vectors_centers = mlvl_scores[keep_idxs]
+            
+            for box_cluster, center_score in zip(box_cluster_idxs, predicted_prob_vectors_centers):
+                cluster_categorical_params = mlvl_scores[box_cluster]
+                _, center_cat_idx = torch.max(center_score, 0)
+                _, cat_idx = torch.max(cluster_categorical_params, 1)
+                class_similarity_idx = cat_idx == center_cat_idx
+                
+                predicted_prob_vectors_list.append(center_score.unsqueeze(0))
+                
+                # Switch to numpy as torch.inverse is too slow.
+                cluster_means = mlvl_bboxes[box_cluster, :][class_similarity_idx].cpu().numpy()
+                cluster_covs = mlvl_bbox_covs[box_cluster, :][class_similarity_idx].cpu().numpy()
+                
+                predicted_box, predicted_box_covariance = self._bbox_bayesian_inference(cluster_means,
+                                                                                        cluster_covs)
+                predicted_boxes_list.append(torch.from_numpy(np.squeeze(predicted_box)))
+                predicted_boxes_covariance_list.append(torch.from_numpy(predicted_box_covariance))
+            
+            det_labels = mlvl_labels[keep_idxs][:cfg.max_per_img]
+            det_bboxes = torch.stack(predicted_boxes_list).to(mlvl_bboxes.device)
+            det_bboxes = torch.cat([det_bboxes, predicted_prob_vectors_centers], -1)
+            det_bbox_covs = torch.stack(predicted_boxes_covariance_list).to(mlvl_bbox_covs.device)
+
+            return det_bboxes, det_bbox_covs, det_labels
