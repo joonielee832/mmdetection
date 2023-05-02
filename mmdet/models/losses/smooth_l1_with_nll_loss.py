@@ -21,19 +21,19 @@ class SmoothL1WithNLL(nn.Module):
         loss_weight (float, optional): The weight of loss.
     """
 
-    def __init__(self, beta=1.0, reduction='mean', covariance_type='diagonal', annealing_step=174640, loss_weight=1.0):
+    def __init__(self, beta=1.0, reduction='mean', covariance_type='diagonal', attenuated=True, loss_weight=1.0):
         super(SmoothL1WithNLL, self).__init__()
         self.beta = beta
         self.reduction = reduction
         self.loss_weight = loss_weight
         self.covariance_type = covariance_type
-        self.annealing_step = annealing_step
+        self.attenuated = attenuated
 
     def forward(self,
                 pred,
                 pred_cov,
                 target,
-                current_step,
+                attenuated_weight=1.0,
                 weight=None,
                 avg_factor=None,
                 reduction_override=None,
@@ -44,6 +44,7 @@ class SmoothL1WithNLL(nn.Module):
             pred (torch.Tensor): The prediction.
             prev_cov (torch.Tensor): The covariance of the prediction
             target (torch.Tensor): The learning target of the prediction.
+            attenuated_weight (float, optional): The weight of the attenuated loss.
             weight (torch.Tensor, optional): The weight of loss for each
                 prediction. Defaults to None.
             avg_factor (int, optional): Average factor that is used to average
@@ -63,29 +64,26 @@ class SmoothL1WithNLL(nn.Module):
             pred,
             target,
             weight,
-            beta=self.beta,
             reduction='none',
             avg_factor=None,
             **kwargs)
         loss_cov_reg = 0.5 * pred_cov
         loss_bbox += loss_cov_reg
 
-        loss_bbox = weight_reduce_loss(loss_bbox, weight, reduction, avg_factor)
+        loss_bbox = weight_reduce_loss(loss_bbox, weight, reduction, avg_factor)    #! different from pod_compare;
         
         #? Perform loss annealing
         standard_loss_bbox = smooth_l1_loss(
             pred,
             target,
             weight,
-            beta=self.beta,
             reduction=reduction,
             avg_factor=avg_factor,
             **kwargs
         )
-        probabilistic_weight = min(1.0, current_step/self.annealing_step)
-        probabilistic_weight = (100**probabilistic_weight-1.0)/(100.0-1.0)
-        loss_bbox = (1.0 - probabilistic_weight) * \
-            standard_loss_bbox + probabilistic_weight * loss_bbox
+            
+        loss_bbox = (1.0 - attenuated_weight) * \
+            standard_loss_bbox + attenuated_weight * loss_bbox
         loss_bbox = self.loss_weight * loss_bbox
         return loss_bbox
 
