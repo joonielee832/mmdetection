@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from mmcv.runner import force_fp32
-from mmcv.cnn.utils import xavier_init
+from mmcv.cnn.utils import xavier_init, normal_init
 from mmcv.cnn import ConvModule
 from mmcv.ops import batched_nms
 
@@ -145,9 +145,15 @@ class ProbabilisticRetinaHead(RetinaHead):
                 if override_init_cfg is not None and isinstance(override_init_cfg, list):
                     for _init in override_init_cfg:
                         if _init.name == "retina_cls_var":
-                            xavier_init(self.retina_cls_var, bias=_init.bias)
+                            if _init.type == "Xavier":
+                                xavier_init(self.retina_cls_var, bias=_init.bias)
+                            else:
+                                normal_init(self.retina_cls_var, mean=0, std=_init.std, bias=_init.bias)
                         elif _init.name == "retina_reg_cov":
-                            xavier_init(self.retina_reg_cov, bias=_init.bias)
+                            if _init.type == "Xavier":
+                                xavier_init(self.retina_cls_var, bias=_init.bias)
+                            else:
+                                normal_init(self.retina_cls_var, mean=0, std=_init.std, bias=_init.bias)
 
     def forward_single(self, x):
         """Forward feature of a single scale level.
