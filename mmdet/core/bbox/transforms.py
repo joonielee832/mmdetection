@@ -131,6 +131,31 @@ def bbox2result(bboxes, labels, num_classes):
             bboxes = bboxes.detach().cpu().numpy()
             labels = labels.detach().cpu().numpy()
         return [bboxes[labels == i, :] for i in range(num_classes)]
+    
+def bbox_and_cov2result(bboxes, bbox_covs, labels, num_classes):
+    """Convert detection results to a list of numpy arrays.
+
+    Args:
+        bboxes (torch.Tensor | np.ndarray): shape (n, 5)
+        bbox_covs (torch.Tensor | np.ndarray): shape (n, 4, 4)
+        labels (torch.Tensor | np.ndarray): shape (n, )
+        num_classes (int): class number, including background class
+
+    Returns:
+        list(ndarray): bbox results of each class
+    """
+    if bboxes.shape[0] == 0:
+        bbox_out = [np.zeros((0, 5), dtype=np.float32) for i in range(num_classes)]
+        bbox_cov_out = [np.zeros((0, 4, 4), dtype=np.float32) for i in range(num_classes)]
+        return bbox_out, bbox_cov_out
+    else:
+        if isinstance(bboxes, torch.Tensor):
+            bboxes = bboxes.detach().cpu().numpy()
+            bbox_covs = bbox_covs.detach().cpu().numpy()
+            labels = labels.detach().cpu().numpy()
+        bbox_out = [bboxes[labels == i, :] for i in range(num_classes)]
+        bbox_cov_out = [bbox_covs[labels == i, :] for i in range(num_classes)]
+        return bbox_out, bbox_cov_out
 
 
 def distance2bbox(points, distance, max_shape=None):

@@ -1,9 +1,12 @@
 import warnings
 
 import torch
+import numpy as np
+import mmcv
 
-from mmdet.core import bbox2result
-from ..builder import DETECTORS, build_backbone, build_head, build_neck
+from mmdet.core import bbox_and_cov2result
+from mmdet.core.visualization import imshow_det_bboxes
+from ..builder import DETECTORS
 
 # from .single_stage import SingleStageDetector
 from .retinanet import RetinaNet
@@ -23,7 +26,6 @@ class ProbabilisticRetinaNet(RetinaNet):
         super(ProbabilisticRetinaNet, self).__init__(backbone, neck, bbox_head, train_cfg,
                                         test_cfg, pretrained, init_cfg)
     
-    #TODO: simple_test function overwrite from single_stage
     def simple_test(self, img, img_metas, rescale=False):
         """Test function without test-time augmentation.
 
@@ -41,41 +43,84 @@ class ProbabilisticRetinaNet(RetinaNet):
         feat = self.extract_feat(img)
         results_list = self.bbox_head.simple_test(
             feat, img_metas, rescale=rescale)
-        bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
+        bbox_with_cov_results = [
+            bbox_and_cov2result(det_bboxes, det_bbox_covs, det_labels, self.bbox_head.num_classes)
             for det_bboxes, det_bbox_covs, det_labels in results_list
         ]
-        return bbox_results
-
-    #TODO: aug_test function overwrite from single_stage
-    def aug_test(self, imgs, img_metas, rescale=False):
-        """Test function with test time augmentation.
+        return bbox_with_cov_results
+    
+    def show_result(self,
+                    img,
+                    result,
+                    score_thr=0.3,
+                    bbox_color=(72, 101, 241),
+                    text_color=(72, 101, 241),
+                    mask_color=None,
+                    thickness=2,
+                    font_size=13,
+                    win_name='',
+                    show=False,
+                    wait_time=0,
+                    out_file=None):
+        """Draw `result` over `img`.
 
         Args:
-            imgs (list[Tensor]): the outer list indicates test-time
-                augmentations and inner Tensor should have a shape NxCxHxW,
-                which contains all images in the batch.
-            img_metas (list[list[dict]]): the outer list indicates test-time
-                augs (multiscale, flip, etc.) and the inner list indicates
-                images in a batch. each dict has image information.
-            rescale (bool, optional): Whether to rescale the results.
-                Defaults to False.
+            img (str or Tensor): The image to be displayed.
+            result (Tensor or tuple): The results to draw over `img`
+                bbox_result or (bbox_result, bbox_cov_result).
+            score_thr (float, optional): Minimum score of bboxes to be shown.
+                Default: 0.3.
+            bbox_color (str or tuple(int) or :obj:`Color`):Color of bbox lines.
+               The tuple of color should be in BGR order. Default: 'green'
+            text_color (str or tuple(int) or :obj:`Color`):Color of texts.
+               The tuple of color should be in BGR order. Default: 'green'
+            mask_color (None or str or tuple(int) or :obj:`Color`):
+               Color of masks. The tuple of color should be in BGR order.
+               Default: None
+            thickness (int): Thickness of lines. Default: 2
+            font_size (int): Font size of texts. Default: 13
+            win_name (str): The window name. Default: ''
+            wait_time (float): Value of waitKey param.
+                Default: 0.
+            show (bool): Whether to show the image.
+                Default: False.
+            out_file (str or None): The filename to write the image.
+                Default: None.
 
         Returns:
-            list[list[np.ndarray]]: BBox results of each image and classes.
-                The outer list corresponds to each image. The inner list
-                corresponds to each class.
+            img (Tensor): Only if not `show` or `out_file`
         """
-        breakpoint()
-        assert hasattr(self.bbox_head, 'aug_test'), \
-            f'{self.bbox_head.__class__.__name__}' \
-            ' does not support test-time augmentation'
-
-        feats = self.extract_feats(imgs)
-        results_list = self.bbox_head.aug_test(
-            feats, img_metas, rescale=rescale)
-        bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-            for det_bboxes, det_labels in results_list
+        img = mmcv.imread(img)
+        img = img.copy()
+        bbox_result, bbox_cov_result = result
+        bboxes = np.vstack(bbox_result)
+        bbox_covs = np.vstack(bbox_cov_result)
+        labels = [
+            np.full(bbox.shape[0], i, dtype=np.int32)
+            for i, bbox in enumerate(bbox_result)
         ]
-        return bbox_results
+        labels = np.concatenate(labels)
+        # if out_file specified, do not show image in window
+        if out_file is not None:
+            show = False
+        # draw bounding boxes
+        img = imshow_det_bboxes(
+            img,
+            bboxes,
+            labels,
+            None,
+            bbox_covs=bbox_covs,
+            class_names=self.CLASSES,
+            score_thr=score_thr,
+            bbox_color=bbox_color,
+            text_color=text_color,
+            mask_color=mask_color,
+            thickness=thickness,
+            font_size=font_size,
+            win_name=win_name,
+            show=show,
+            wait_time=wait_time,
+            out_file=out_file)
+
+        if not (show or out_file):
+            return img

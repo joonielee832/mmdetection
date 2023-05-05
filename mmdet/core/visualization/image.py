@@ -5,9 +5,11 @@ import cv2
 import matplotlib.pyplot as plt
 import mmcv
 import numpy as np
+from scipy.stats import norm, chi2
 import pycocotools.mask as mask_util
-from matplotlib.collections import PatchCollection
+from matplotlib.collections import PatchCollection, EllipseCollection
 from matplotlib.patches import Polygon
+from matplotlib.patches import Ellipse
 
 from mmdet.core.evaluation.panoptic_utils import INSTANCE_OFFSET
 from ..mask.structures import bitmap_to_polygon
@@ -110,6 +112,98 @@ def draw_bboxes(ax, bboxes, color='g', alpha=0.8, thickness=2):
 
     return ax
 
+def get_ellipse_params(cov, q=None, nsig=2):
+    """
+    Parameters
+    ----------
+    cov : (2, 2) array
+        Covariance matrix.
+    q : float, optional
+        Confidence level, should be in (0, 1).
+    nsig : int, optional
+        Confidence level in unit of standard deviations.
+        E.g. 1 stands for 68.3% and 2 stands for 95.4%.
+
+    Returns
+    -------
+    width, height, rotation :
+            The lengths of two axises and the rotation angle in degree
+    for the ellipse.
+    """
+    if q is not None:
+        q = np.asarray(q)
+    elif nsig is not None:
+        q = 2 * norm.cdf(nsig) - 1
+    else:
+        raise ValueError('One of `q` and `nsig` should be specified.')
+    r2 = chi2.ppf(q, 2)
+
+    val, vec = np.linalg.eigh(cov)
+    width, height = 2 * np.sqrt(val[:, None] * r2)
+    rotation = np.degrees(np.arctan2(*vec[::-1, 0]))
+
+    return width, height, rotation
+
+def draw_ellipse(ax, bboxes, covs, color='g', alpha=0.8, thickness=2):
+    """Draw covariance ellipses on the axes.
+
+    Args:
+        ax (matplotlib.Axes): The input axes.
+        bboxes (ndarray): The input bounding boxes with the shape
+            of (n, 4).
+        covs (ndarray): The input bounding box covariance matrices with the shape
+            of (n, 4, 4).
+        color (list[tuple] | matplotlib.color): the colors for each
+            bounding boxes.
+        alpha (float): Transparency of bounding boxes. Default: 0.8.
+        thickness (int): Thickness of lines. Default: 2.
+
+    Returns:
+        matplotlib.Axes: The result axes.
+    """
+    assert(len(bboxes) == len(covs))
+    ellipses = []
+    for i, (bbox, cov) in enumerate(zip(bboxes, covs)):
+        bbox_int = bbox.astype(np.int32)
+        x1, y1, x2, y2 = bbox_int[:4]
+        
+        width, height, rotation = get_ellipse_params(cov[:2, :2])
+        width[width < 0] = 0
+        height[height < 0] = 0
+        if not (np.isnan(width) or np.isnan(height) or np.isnan(rotation)):
+            width = width.astype(np.int32)
+            height = height.astype(np.int32)
+            rotation = rotation.astype(np.int32) + 180
+            
+            e1 = Ellipse(
+                xy=(x1, y1),
+                width=width,
+                height=height,
+                angle=rotation)
+            ellipses.append(e1)
+
+        width, height, rotation = get_ellipse_params(cov[2:, 2:])
+        width[width < 0] = 0
+        height[height < 0] = 0
+        if not (np.isnan(width) or np.isnan(height) or np.isnan(rotation)):
+            width = width.astype(np.int32)
+            height = height.astype(np.int32)
+            rotation = rotation.astype(np.int32) + 180
+            e = Ellipse(
+                xy=(x2, y2),
+                width=width,
+                height=height,
+                angle=rotation)
+            ellipses.append(e)
+    p = PatchCollection(
+        ellipses,
+        facecolor='none',
+        edgecolors=color,
+        linewidths=thickness,
+        alpha=alpha)
+    ax.add_collection(p)
+    return ax
+
 
 def draw_labels(ax,
                 labels,
@@ -209,6 +303,7 @@ def imshow_det_bboxes(img,
                       bboxes=None,
                       labels=None,
                       segms=None,
+                      bbox_covs=None,
                       class_names=None,
                       score_thr=0,
                       bbox_color='green',
@@ -274,6 +369,8 @@ def imshow_det_bboxes(img,
         labels = labels[inds]
         if segms is not None:
             segms = segms[inds, ...]
+        if bbox_covs is not None:
+            bbox_covs = bbox_covs[inds, ...]
 
     img = mmcv.bgr2rgb(img)
     width, height = img.shape[1], img.shape[0]
@@ -318,6 +415,10 @@ def imshow_det_bboxes(img,
             font_size=font_size,
             scales=scales,
             horizontal_alignment=horizontal_alignment)
+
+        #? Draw bbox covariance
+        if bbox_covs is not None:
+            draw_ellipse(ax, bboxes, bbox_covs, colors, alpha=0.8, thickness=thickness)
 
     if segms is not None:
         mask_palette = get_palette(mask_color, max_label + 1)
