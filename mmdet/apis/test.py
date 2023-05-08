@@ -62,6 +62,7 @@ def single_gpu_test(model,
                         out_file=out_file,
                         score_thr=show_score_thr)
 
+        #? Check if covariance in output
         if isinstance(result[0], tuple):
             res = []
             cov_res = []
@@ -69,8 +70,11 @@ def single_gpu_test(model,
                 res.append(bbox)
                 cov_res.append(cov)
 
-        results.extend(res)
-        cov_results.extend(cov_res)
+            results.extend(res)
+            cov_results.extend(cov_res)
+        #? Regular bbox output
+        else:
+            results.extend(result)
 
         for _ in range(batch_size):
             prog_bar.update()
