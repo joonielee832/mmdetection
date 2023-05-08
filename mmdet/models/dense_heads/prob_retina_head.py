@@ -502,7 +502,6 @@ class ProbabilisticRetinaHead(RetinaHead):
                 The shape of the second tensor in the tuple is ``labels``
                 with shape (n, ).
         """
-        # breakpoint()
         return self.simple_test_bboxes(feats, img_metas, rescale=rescale)
     
     @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'cls_vars', 'bbox_covs'))
@@ -853,7 +852,6 @@ class ProbabilisticRetinaHead(RetinaHead):
             box_cluster_idxs = box_cluster_idxs > self.affinity_thr
             
             #? Compute mean and covariance for every cluster.
-
             predicted_prob_vectors_list = []
             predicted_boxes_list = []
             predicted_boxes_covariance_list = []
